@@ -3,7 +3,7 @@
 [![Maven Package upon a push](https://github.com/mosip/keycloak/actions/workflows/push-trigger.yml/badge.svg?branch=release-1.3.x)](https://github.com/mosip/keycloak/actions/workflows/push-trigger.yml)
 
 ## Overview
-Contains MOSIP customised keycloak image for IAM.  
+Contains MY-PASS customised keycloak image for IAM.  
 
 ## Documentation
 To know more about Keycloack, refer [here](https://docs.mosip.io/1.2.0/modules/keycloak).
