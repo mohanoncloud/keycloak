@@ -16,7 +16,6 @@ on:
       - develop
       - 1.*
       - release*
-      - MOSIP*
 
 jobs:
   build-dockers:
