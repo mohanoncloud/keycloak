@@ -1,5 +1,8 @@
 name: Keycloak Build upon a push
 
+permissions:
+  contents: read
+
 on:
   pull_request:
     types: [opened, reopened, synchronize]
@@ -11,19 +14,24 @@ on:
         default: 'Triggered for Updates'
         type: string
   push:
+    # develop and main only, not develop*: that pattern also matched develop-automation and
+    # every develop-<ticket> work branch, each publishing its own images to GHCR. The upstream
+    # release*, master and 1.* lines are not built or deployed by BHS-BS.
     branches:
-      - master
       - develop
-      - 1.*
-      - release*
+      - main
+
+concurrency:
+  group: keycloak-images-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build-dockers:
     strategy:
       matrix:
+        # keycloak-jboss (mosip-jboss-keycloak) is not built: its base image jboss/keycloak:9.0.0 no
+        # longer exists on Docker Hub, and the BHS stack runs quay.io/keycloak/keycloak:26.7 instead.
         include:
-          - SERVICE_LOCATION: 'keycloak-jboss'
-            SERVICE_NAME: 'mosip-jboss-keycloak'
           - SERVICE_LOCATION: 'keycloak-init'
             SERVICE_NAME: 'keycloak-init'
           - SERVICE_LOCATION: 'keycloak-artemis'
