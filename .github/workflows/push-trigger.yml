@@ -1,8 +1,9 @@
 name: Keycloak Build upon a push
 
+permissions:
+  contents: read
+
 on:
-  release:
-    types: [published]
   pull_request:
     types: [opened, reopened, synchronize]
   workflow_dispatch:
@@ -13,38 +14,34 @@ on:
         default: 'Triggered for Updates'
         type: string
   push:
+    # develop and main only, not develop*: that pattern also matched develop-automation and
+    # every develop-<ticket> work branch, each publishing its own images to GHCR. The upstream
+    # release*, master and 1.* lines are not built or deployed by BHS-BS.
     branches:
-      - master
       - develop
-      - 1.*
-      - release*
-      - MOSIP*
-  
+      - main
+
+concurrency:
+  group: keycloak-images-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build-dockers:
     strategy:
       matrix:
+        # keycloak-jboss (mosip-jboss-keycloak) is not built: its base image jboss/keycloak:9.0.0 no
+        # longer exists on Docker Hub, and the BHS stack runs quay.io/keycloak/keycloak:26.7 instead.
         include:
-          - SERVICE_LOCATION: 'keycloak-jboss'
-            SERVICE_NAME: 'mosip-jboss-keycloak'
-            PLATFORMS: "linux/amd64"
           - SERVICE_LOCATION: 'keycloak-init'
             SERVICE_NAME: 'keycloak-init'
-            PLATFORMS: "linux/amd64"
           - SERVICE_LOCATION: 'keycloak-artemis'
             SERVICE_NAME: 'mosip-artemis-keycloak'
-            PLATFORMS: "linux/amd64"
       fail-fast: false
     name: ${{ matrix.SERVICE_NAME }}
-    uses: mosip/kattu/.github/workflows/docker-build.yml@master
+    permissions:
+      contents: read
+      packages: write
+    uses: BHS-BS/shared-workflow/.github/workflows/docker-build.yml@develop
     with:
       SERVICE_LOCATION: ${{ matrix.SERVICE_LOCATION }}
       SERVICE_NAME: ${{ matrix.SERVICE_NAME }}
-      BUILD_ARTIFACT: ${{ matrix.BUILD_ARTIFACT || false }}
-      ONLY_DOCKER: ${{ matrix.ONLY_DOCKER || false }}
-      PLATFORMS: ${{ matrix.PLATFORMS }}
-    secrets:
-      DEV_NAMESPACE_DOCKER_HUB: ${{ secrets.DEV_NAMESPACE_DOCKER_HUB }}
-      ACTOR_DOCKER_HUB: ${{ secrets.ACTOR_DOCKER_HUB }}
-      RELEASE_DOCKER_HUB: ${{ secrets.RELEASE_DOCKER_HUB }}
-      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_DEVOPS }}
