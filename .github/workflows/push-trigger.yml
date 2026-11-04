@@ -26,16 +26,89 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Decides which images this change needs. A job and not a workflow-level `paths:` filter:
+  # ci-gate below is a required check, and a workflow that never starts leaves a required
+  # check "Expected" forever.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # To look up the last successful run of this workflow on the branch.
+      actions: read
+    outputs:
+      images: ${{ steps.diff.outputs.images }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: diff
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Each image as <directory>:<image name>. keycloak-jboss (mosip-jboss-keycloak) is not
+          # built: its base image jboss/keycloak:9.0.0 no longer exists on Docker Hub, and the BHS
+          # stack runs quay.io/keycloak/keycloak:26.7 instead.
+          ALL="keycloak-init:keycloak-init keycloak-artemis:mosip-artemis-keycloak"
+
+          # Writes the docker-build matrix for the given images ([] for none) and ends the step.
+          emit() {
+            local json
+            json=$(printf '%s\n' "$@" | sed '/^$/d' | sort -u \
+              | jq -R 'split(":") | {SERVICE_LOCATION: .[0], SERVICE_NAME: .[1]}' \
+              | jq -sc .)
+            echo "images=$json" | tee -a "$GITHUB_OUTPUT"
+            exit 0
+          }
+          everything() { echo "Building every image ($1)"; emit $ALL; }
+
+          case "$EVENT" in
+            pull_request)
+              files=$(git diff --name-only "origin/$BASE_REF...HEAD") || everything "diff failed" ;;
+            push)
+              # All-zero "before" = a newly created branch: there is nothing to diff against.
+              [ "$BEFORE" = "0000000000000000000000000000000000000000" ] && everything "new branch"
+              # Diff from the last SUCCESSFUL push/dispatch run of this branch, not from `before`:
+              # a run that failed, or was replaced while queued (see `concurrency`), built nothing,
+              # so its changes must be included here.
+              last=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/push-trigger.yml/runs?branch=$REF_NAME&status=success&per_page=20" \
+                       --jq '[.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch")][0].head_sha // empty') \
+                || everything "run lookup failed"
+              [ -n "$last" ] || everything "no earlier successful run"
+              git merge-base --is-ancestor "$last" "$SHA" || everything "last successful run $last is not an ancestor"
+              echo "Diffing from the last successful run: $last"
+              files=$(git diff --name-only "$last" "$SHA") || everything "diff failed" ;;
+            *)
+              # workflow_dispatch: always build everything.
+              everything "$EVENT" ;;
+          esac
+          echo "Changed files:"; printf '%s\n' "$files"
+
+          # Docs never trigger a build.
+          files=$(printf '%s\n' "$files" | grep -Ev '(\.md$|^docs/)' || true)
+          has() { grep -Eq "$1" <<< "$files"; }
+
+          # A change to this workflow or the signing keys rebuilds everything.
+          if has '^\.github/(workflows/push-trigger\.yml$|keys/)'; then everything "CI definition changed"; fi
+
+          images=""
+          for i in $ALL; do
+            if has "^${i%%:*}/"; then images="$images $i"; fi
+          done
+          # No image directory changed (helm, deploy, keycloak-jboss, ...): no image build.
+          emit $images
+
   build-dockers:
+    needs: changes
+    if: ${{ needs.changes.outputs.images != '[]' }}
     strategy:
       matrix:
-        # keycloak-jboss (mosip-jboss-keycloak) is not built: its base image jboss/keycloak:9.0.0 no
-        # longer exists on Docker Hub, and the BHS stack runs quay.io/keycloak/keycloak:26.7 instead.
-        include:
-          - SERVICE_LOCATION: 'keycloak-init'
-            SERVICE_NAME: 'keycloak-init'
-          - SERVICE_LOCATION: 'keycloak-artemis'
-            SERVICE_NAME: 'mosip-artemis-keycloak'
+        include: ${{ fromJSON(needs.changes.outputs.images) }}
       fail-fast: false
     name: ${{ matrix.SERVICE_NAME }}
     permissions:
@@ -45,3 +118,24 @@ jobs:
     with:
       SERVICE_LOCATION: ${{ matrix.SERVICE_LOCATION }}
       SERVICE_NAME: ${{ matrix.SERVICE_NAME }}
+
+  # The one required status check. Runs after every build job, even when one failed or was
+  # skipped, and fails if any of them failed or was cancelled. A skipped build (docs-only
+  # change, or an image this change does not touch) counts as passing. always(), not
+  # !cancelled(): a skipped gate counts as a passing required check, so a cancelled run
+  # would otherwise let an untested commit merge.
+  ci-gate:
+    needs: [changes, build-dockers]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check prerequisite results
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          echo "Prerequisite results: $RESULTS"
+          if [ "$FAILED" = "true" ]; then
+            echo "::error::A required build failed or was cancelled."
+            exit 1
+          fi
